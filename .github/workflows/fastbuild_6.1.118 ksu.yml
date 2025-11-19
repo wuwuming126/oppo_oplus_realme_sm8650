@@ -8,8 +8,13 @@ env:
 
 on:
   workflow_dispatch:
-    # 移除所有 inputs，保持极简
-    
+    inputs:
+      baseband_guard:
+        description: '是否开启内核级基带保护(阻止一切对非用户分区的写入，有效防止格机)'
+        required: true
+        type: boolean
+        default: 'true'
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -63,8 +68,6 @@ jobs:
           df -h
           echo "当前构建内核版本：6.1.118"
 
-      # 移除：载入当前版本内核的 ccache缓存
-
       - name: 初始化并配置ccache (并清除缓存)
         run: |
           # 设置ccache环境变量
@@ -105,6 +108,38 @@ jobs:
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+      - name: 启用内核级基带保护
+        if: github.event.inputs.baseband_guard == 'true'
+        run: |
+          echo "正在启用启用内核级基带保护支持…"
+          cd kernel_workspace
+          echo "CONFIG_BBG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          cd ./common/security
+          wget https://github.com/cctv18/Baseband-guard/archive/refs/heads/master.zip
+          unzip -q master.zip
+          mv "Baseband-guard-master" baseband-guard
+          printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> ./Makefile
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' ./Kconfig
+          awk '
+          /endmenu/ { last_endmenu_line = NR }
+          { lines[NR] = $0 }
+          END {
+            for (i=1; i<=NR; i++) {
+              if (i == last_endmenu_line) {
+                sub(/endmenu/, "", lines[i]);
+                print lines[i] "source \"security/baseband-guard/Kconfig\""
+                print ""
+                print "endmenu"
+              } else {
+                  print lines[i]
+              }
+            }
+          }
+          ' ./Kconfig > Kconfig.tmp && mv Kconfig.tmp ./Kconfig
+          sed -i 's/selinuxfs.o //g' "./selinux/Makefile"
+          sed -i 's/hooks.o //g' "./selinux/Makefile"
+          cat "./baseband-guard/sepatch.txt" >> "./selinux/Makefile"
 
       - name: 仅保留：添加 KernelSU 核心配置项及用户自定义配置
         run: |
