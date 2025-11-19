@@ -8,18 +8,8 @@ env:
 
 on:
   workflow_dispatch:
-    inputs:
-      ccache_debug:
-        description: '是否上传 Ccache调试日志(用于调试, 无需要可关闭)'
-        required: true
-        type: boolean
-        default: 'false'
-      kernel_suffix:
-        description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
-        required: false
-        type: string
-        default: ''
-
+    # 移除所有 inputs，保持极简
+    
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -73,17 +63,9 @@ jobs:
           df -h
           echo "当前构建内核版本：6.1.118"
 
-      - name: 载入当前版本内核的 ccache缓存
-        uses: actions/cache@v4
-        id: ccache-restore
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-neov3-6.1.118-${{ runner.os }}-main
-          restore-keys: |
-            ccache-neov3-6.1.118-${{ runner.os }}-
-            ccache-neov3-6.1.118-
-      
-      - name: 初始化并配置ccache
+      # 移除：载入当前版本内核的 ccache缓存
+
+      - name: 初始化并配置ccache (并清除缓存)
         run: |
           # 设置ccache环境变量
           export CCACHE_COMPILERCHECK="none"
@@ -101,15 +83,13 @@ jobs:
           ccache -M "$CCACHE_MAXSIZE"
           ccache -o compression=true
           
-          # 显示初始缓存状态
+          # 显式清除所有缓存内容 (用户要求)
+          echo "正在清除所有ccache缓存..."
+          ccache -C
+          
+          # 显示初始缓存状态 (此时应为清空状态)
           echo "ccache初始状态:"
           ccache -s
-          
-          # 如果缓存恢复命中，显示详细信息
-          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
-            echo "ccache缓存命中详情:"
-            ccache -sv
-          fi
 
       - name: 仅保留：添加KernelSU (tiann/KernelSU)
         id: ksu_version
@@ -135,21 +115,12 @@ jobs:
           echo "CONFIG_OVERLAY_FS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-      - name: 添加制作名称
+      - name: 应用内核版本后缀
         run: |
-          cd kernel_workspace
-          echo "替换内核版本后缀..."
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            echo "当前内核版本后缀：${{ github.event.inputs.kernel_suffix }}"
-            for f in ./common/scripts/setlocalversion; do
-              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
-            done
-          else
-            echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
-            for f in ./common/scripts/setlocalversion; do
-              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ env.KERNEL_NAME }}\"|" "$f"
-            done
-          fi
+          cd kernel_workspace/common/scripts
+          echo "应用默认内核版本后缀：-${{ env.KERNEL_NAME }}"
+          # Modify setlocalversion to output the fixed suffix
+          sed -i "\$s|echo \"\\\$res\"|echo \"-${{ env.KERNEL_NAME }}\"|" setlocalversion
            
       - name: 构建内核
         run: |
@@ -197,18 +168,8 @@ jobs:
             exit 1
           fi
           KSU_TYPENAME="KSU"
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ github.event.inputs.kernel_suffix }}.zip ./*
-          else
-            zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ env.KERNEL_NAME }}.zip ./*
-          fi
-
-      - name: 上传 Ccache 调试日志
-        if: always() && inputs.ccache_debug
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-debug-log
-          path: ${{ github.workspace }}/kernel_workspace/ccache.log
+          # 简化打包命名，使用固定的 KERNEL_NAME
+          zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ env.KERNEL_NAME }}.zip ./*
 
       - name: 上传 ZIP 工件
         uses: actions/upload-artifact@v4
