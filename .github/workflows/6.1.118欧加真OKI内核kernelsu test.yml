@@ -51,7 +51,7 @@ on:
         required: true
         type: boolean
         default: 'true'
-      lto_type: # <--- 新的 LTO 选项: none/thin/full
+      lto_type: # <--- 修改: 新增 LTO 选择项: none/thin/full
         description: '启用何种 Link-Time Optimization (LTO) 全局编译优化'
         required: true
         type: choice
@@ -115,6 +115,7 @@ jobs:
           done
 
       - name: 配置ccache目录
+        if: ${{ env.SKIP_CCACHE_SETUP != 'true' }} # <--- 修改: LTO 启用时跳过
         run: |
           echo "CCACHE_DIR=$HOME/.ccache_6.1.118" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
@@ -123,6 +124,7 @@ jobs:
           echo "当前构建内核版本：6.1.118"
 
       - name: 初始化并配置ccache (并清除缓存)
+        if: ${{ env.SKIP_CCACHE_SETUP != 'true' }} # <--- 修改: LTO 启用时跳过
         run: |
           # 设置ccache环境变量
           export CCACHE_COMPILERCHECK="none"
@@ -294,8 +296,8 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_REKERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-      - name: 配置 LTO 编译优化 # <--- 修改的步骤名称
-        if: github.event.inputs.lto_type != 'none'
+      - name: 配置 LTO 编译优化 # <--- 修改步骤名称
+        if: github.event.inputs.lto_type != 'none' # <--- 修改条件
         run: |
           echo "正在配置 ${{ github.event.inputs.lto_type }} LTO (Link-Time Optimization)..."
           cd kernel_workspace
@@ -305,12 +307,15 @@ jobs:
           if [[ "${{ github.event.inputs.lto_type }}" == "thin" ]]; then
             echo "CONFIG_THIN_ARCHIVES=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "LTO 启用 (Thin LTO)，将强制禁用 ccache。"
-            echo "USE_CCACHE=false" >> $GITHUB_ENV # 禁用 ccache
           elif [[ "${{ github.event.inputs.lto_type }}" == "full" ]]; then
             # Full LTO 不启用 CONFIG_THIN_ARCHIVES
+            # 确保不写入 CONFIG_THIN_ARCHIVES=y，即使它可能在 gki_defconfig 中，也会被 make oldconfig 处理掉。
             echo "LTO 启用 (Full LTO)，将强制禁用 ccache。"
-            echo "USE_CCACHE=false" >> $GITHUB_ENV # 禁用 ccache
           fi
+          
+          # 严格禁用 ccache 的标志
+          echo "USE_CCACHE=false" >> $GITHUB_ENV
+          echo "SKIP_CCACHE_SETUP=true" >> $GITHUB_ENV # <--- 新增：跳过 ccache 设置步骤
         
       - name: 应用内核核心配置、KernelSU及定制配置 (含O2优化)
         run: |
@@ -366,30 +371,14 @@ jobs:
       - name: 构建内核
         run: |
           WORKDIR="$(pwd)"
-          export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/clang20/bin:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
-          CLANG_DIR="$WORKDIR/kernel_workspace/clang20/bin"
-          
-          echo "编译器信息:"
-          "$CLANG_DIR/clang" --version | head -n 1
-          "$CLANG_DIR/ld.lld" --version | head -n 1
-          pahole --version 2>/dev/null | head -n1 || echo "pahole版本：未安装"
           
           # 检查 LTO 启用状态以决定是否使用 ccache
-          if [[ "${{ env.USE_CCACHE }}" == "false" ]]; then
-              CC_COMMAND="clang"
-              echo "LTO 启用，使用纯 clang 进行构建。"
-              # 清除 ccache 相关的环境变量，防止误用
-              unset CCACHE_LOGFILE
-              unset CCACHE_COMPILERCHECK
-              unset CCACHE_BASEDIR
-              unset CCACHE_NOHASHDIR
-              unset CCACHE_HARDLINK
-              unset CCACHE_DIR
-              unset CCACHE_MAXSIZE
-          else
+          if [[ "${{ env.USE_CCACHE }}" != "false" ]]; then
+              # LTO 未启用，使用 ccache。将 ccache 路径加入 PATH
+              export PATH="/usr/lib/ccache:$PATH" # <--- 修改: 条件性加入 PATH
               CC_COMMAND="ccache clang"
+              
+              # 设置 ccache 环境变量（仅在启用 ccache 时需要）
               export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
               export CCACHE_COMPILERCHECK="none"
               export CCACHE_BASEDIR="${{ github.workspace }}"
@@ -399,7 +388,29 @@ jobs:
               export CCACHE_MAXSIZE="3G"
               echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
               echo "LTO 未启用，使用 ccache clang 进行构建。"
+          else
+              # LTO 启用，**不**将 ccache 加入 PATH，使用纯 clang
+              CC_COMMAND="clang"
+              echo "LTO 启用，使用纯 clang 进行构建。"
+              # 清除所有 ccache 相关的环境变量，确保干净
+              unset CCACHE_LOGFILE
+              unset CCACHE_COMPILERCHECK
+              unset CCACHE_BASEDIR
+              unset CCACHE_NOHASHDIR
+              unset CCACHE_HARDLINK
+              unset CCACHE_DIR
+              unset CCACHE_MAXSIZE
           fi
+
+          # LLVM 工具链的路径无论如何都要设置
+          export PATH="$WORKDIR/kernel_workspace/clang20/bin:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
+          CLANG_DIR="$WORKDIR/kernel_workspace/clang20/bin"
+          
+          echo "编译器信息:"
+          "$CLANG_DIR/clang" --version | head -n 1
+          "$CLANG_DIR/ld.lld" --version | head -n 1
+          pahole --version 2>/dev/null | head -n1 || echo "pahole版本：未安装"
           
           cd kernel_workspace/common
           
